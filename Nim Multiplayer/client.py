@@ -49,7 +49,7 @@ class Client:
         self.stage = 0  # stage == 0 for greeting, == 1 for socket ready to receive from server regular game session, == 2 ready to send to server
         self.receive_end = 0
         self.amount_so_far = 0
-        self.data = b""  # using this member instead of 'receive_all'
+        self.data = b''  # using this member instead of 'receive_all'
         self.unpacked_data = ()
         self.address = address
 
@@ -65,8 +65,9 @@ class Client:
 
     # ________________________________________________________________
     def nonblocking_receive(self):
-        self.data += socket.recv(SERVER_RECEIVE_LENGTH - len(self.data))
-        return self.is_receive_done(self)
+        self.data += self.socket.recv(SERVER_RECEIVE_LENGTH - len(self.data))
+        ret = self.is_receive_done()
+        return ret
 
     # ________________________________________________________________
     def is_send_done(self):
@@ -81,7 +82,7 @@ class Client:
 
     # ________________________________________________________________
     def nullify_data(self):
-        self.data = b""
+        self.data = b''
 
     # ________________________________________________________________
 
@@ -143,8 +144,7 @@ def fill_buff(sock):  # also: return 1 if connection is terminated, and 0 otherw
 """
 
 
-def fill_buff_MULTIPLAYER(
-        client):  # also: return 1 if connection is terminated, 0 if buffer is ready , -1 if buffer not ready yet
+def fill_buff_MULTIPLAYER(client):  # also: return 1 if connection is terminated, 0 if buffer is ready , -1 if buffer not ready yet
     try:
         is_done = client.nonblocking_receive()
     except client.socket.error as exc:
@@ -157,7 +157,7 @@ def fill_buff_MULTIPLAYER(
         return 1
     if is_done:
         client.unpacked_data += struct.unpack(SERVER_REC_FORMAT, client.data)
-        # client.nullify_data()  # erasing that data from the client
+        client.nullify_data()  # erasing that data from the client
         client.stage = 2  # this socket were in stage 1 i.e recv data and now it should send the corresponding data after server move
         return 0
     return -1
@@ -201,10 +201,10 @@ def wait_to_active(max_players):
 
 def updating_client(client):
     read_ready_sock = client.socket
-    termination, buff = fill_buff_MULTIPLAYER(active_sockets_dict[read_ready_sock])
+    termination = fill_buff_MULTIPLAYER(active_sockets_dict[read_ready_sock])
     if termination:
         active_sockets_dict.pop(read_ready_sock)
-    if int(client.buff[1]) == BAD_INPUT:
+    if int(client.unpacked_data[1]) == BAD_INPUT:
         client.heaps = server_move(client.heaps)
         if client.heaps == [0, 0, 0]:
             client.accepted = 0
@@ -212,7 +212,7 @@ def updating_client(client):
         else:
             client.accepted = 0
             client.win = 2
-    elif int(client.buff[2]) > int(client.heaps[int(client.buff[1])]):
+    elif int(client.unpacked_data[2]) > int(client.heaps[int(client.unpacked_data[1])]):
         client.heaps = server_move(client.heaps)
         if client.heaps == [0, 0, 0]:
             client.accepted = 0
@@ -221,7 +221,7 @@ def updating_client(client):
             client.accepted = 0
             client.win = 2
     else:
-        client.heaps[int(client.buff[1])] -= int(client.buff[2])
+        client.heaps[int(client.unpacked_data[1])] -= int(client.unpacked_data[2])
         if client.heaps == [0, 0, 0]:
             client.accepted = 1
             client.win = 1
