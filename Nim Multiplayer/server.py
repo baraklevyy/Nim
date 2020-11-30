@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+# !/usr/bin/python3
 import socket
 import sys
 import struct
@@ -18,10 +18,14 @@ EOF_LIKE = b''
 buff_log = 5
 BAD_INPUT = -100
 ARBITRARY = 20
+ACTIVE_GREETING = -5
 ACTIVE = -1
 WAITING = -10
 REJECTED = -20
-
+WIN = 1
+LOSE = 0
+CLIENT_WIN = 1
+CLIENT_LOSE = 0
 ################# GLOBAL VARIABLES #####################
 queue = OrderedDict()
 """
@@ -30,6 +34,9 @@ values - all metadata needed for client(Client class)
 """
 active_sockets_dict = {}
 """{keys = active sockets , values = Client Class} """
+
+#scapegoat_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # it seems we cannot pass empty socket list to select on Windows
+
 ########################################################
 
 ################# CLIENT_CLASS #########################
@@ -45,8 +52,8 @@ class Client:
         self.win = 0
         self.stage = 0  # stage == 0 for greeting, == 1 for socket ready to receive from server regular game session, == 2 ready to send to server
         self.receive_end = 0
-        self.send_amount = 0
-        self.data = b""  # using this member instead of 'receive_all'
+        self.amount_so_far = 0
+        self.data = b''  # using this member instead of 'receive_all'
         self.unpacked_data = ()
         self.address = address
 
@@ -54,20 +61,35 @@ class Client:
 
     # _______________________________________________________________
     def nonblocking_send(self, data):
-        if len(data) == 0:
-            return None
-        self.send_amount += self.socket.send(data[self.send:])
-        return self.is_send_done(self)
+        try:
+            if len(data) == 0:
+                return None
+            self.amount_so_far += self.socket.send(data[self.amount_so_far:])
+        except Exception as exc:
+            active_sockets_dict.pop(self.socket, None)
+            self.socket.close()
+            print("An error occurred: %s\n" % exc)
+            return -1
+        ret = self.is_send_done()
+        return ret
+
 
     # ________________________________________________________________
     def nonblocking_receive(self):
-        self.data += socket.recv(SERVER_RECEIVE_LENGTH - len(self.data))
-        return self.is_receive_done(self)
+        try:
+            self.data += self.socket.recv(SERVER_RECEIVE_LENGTH - len(self.data))
+        except:
+            print("An error occurred while receiving\n")
+            self.socket.close()
+            active_sockets_dict.pop(self.socket, None)
+            return -1
+        ret = self.is_receive_done()
+        return ret
 
     # ________________________________________________________________
     def is_send_done(self):
-        if self.send_amount == SERVER_SEND_LENGTH:
-            self.send_amount = 0
+        if self.amount_so_far == SERVER_SEND_LENGTH:
+            self.amount_so_far = 0
             return True
         return False
 
@@ -77,7 +99,7 @@ class Client:
 
     # ________________________________________________________________
     def nullify_data(self):
-        self.data = b""
+        self.data = b''
 
     # ________________________________________________________________
 
@@ -89,8 +111,6 @@ def my_sendall(sock, data):
         return None
     ret = sock.send(data)
     return my_sendall(sock, data[ret:])
-
-
 def recv_data(dest_socket, length):
     data = b''
     remaining_length = length
@@ -104,8 +124,6 @@ def recv_data(dest_socket, length):
         data += current_data
         remaining_length -= len(current_data)
     return data
-
-
 def send_heaps(socket, heaps, accepted, win):
     send_msg = [START, accepted, heaps[0], heaps[1], heaps[2], win, END]
     send_msg = [int(e) for e in send_msg]
@@ -116,8 +134,6 @@ def send_heaps(socket, heaps, accepted, win):
     except socket.error as exc:
         print("An error occurred: %s\n" % exc)
         sys.exit()
-
-
 def fill_buff(sock):  # also: return 1 if connection is terminated, and 0 otherwise.\
     buff = ()
     try:
@@ -141,25 +157,21 @@ def fill_buff(sock):  # also: return 1 if connection is terminated, and 0 otherw
             return 1, buff
         # buff += struct.unpack(SERVER_REC_FORMAT, sock.recv(max_bandwidth))
         buff += struct.unpack(SERVER_REC_FORMAT, raw_data=recv_data(sock, 16))
-
     return 0, buff
-
 """
-def fill_buff_MULTIPLAYER(
-        client):  # also: return 1 if connection is terminated, 0 if buffer is ready , -1 if buffer not ready yet
-    try:
-        is_done = client.nonblocking_receive()
-    except client.socket.error as exc:
-        print("An error occurred: %s\n" % exc)
-        """we need to eject this socket from the active_socket_dict"""
-        active_sockets_dict.pop(client.socket, None)
+
+
+def fill_buff_MULTIPLAYER(client):  # also: return 1 if connection is terminated, 0 if buffer is ready , -1 if buffer not ready yet
+
+    is_done = client.nonblocking_receive()
+    if is_done == -1: #exception already close and eject from common dictionary
+        return -1
     if client.data == EOF_LIKE:
-        active_sockets_dict.pop(client.socket, None)
-        client.socket.close()
         return 1
     if is_done:
+        client.unpacked_data = ()
         client.unpacked_data += struct.unpack(SERVER_REC_FORMAT, client.data)
-        # client.nullify_data()  # erasing that data from the client
+        client.nullify_data()  # erasing that data from the client
         client.stage = 2  # this socket were in stage 1 i.e recv data and now it should send the corresponding data after server move
         return 0
     return -1
@@ -183,12 +195,14 @@ def server_move(heaps):
 """sockets that are in Readable list && in queue pressed 'Q' and exited from game"""
 def removing_exited_sockets():
     ordered_sockets = list(queue.keys())
-    #Readable, _, _ = select(rlist=ordered_sockets, wlist=[], xlist=[], timeout=0.2)
-    read_ready, write_ready, exceptions = select(ordered_sockets, [], [])
+    read_ready, write_ready, exceptions = select(ordered_sockets, [], [], 0.3)
     for sock_to_remove in read_ready:
         queue.pop(sock_to_remove)
 
+
 """moving waiting players from queue to active dictionary"""
+
+
 def wait_to_active(max_players):
     while (len(active_sockets_dict) < max_players) and (len(queue) > 0):
         current_sock, current_client = queue.popitem(last=False)
@@ -197,51 +211,52 @@ def wait_to_active(max_players):
 
 
 def updating_client(client):
-    read_ready_sock = client.socket
-    termination, buff = fill_buff_MULTIPLAYER(active_sockets_dict[read_ready_sock])
-    if termination:
-        active_sockets_dict.pop(read_ready_sock)
-    if int(client.buff[1]) == BAD_INPUT:
+    termination = fill_buff_MULTIPLAYER(active_sockets_dict[client.socket])
+    if termination == -1:
+        return
+    if termination == 1:
+        active_sockets_dict.pop(client.socket)
+        client.socket.close()
+    elif int(client.unpacked_data[1]) == BAD_INPUT:
         client.heaps = server_move(client.heaps)
         if client.heaps == [0, 0, 0]:
             client.accepted = 0
-            client.win = 0
+            client.win = CLIENT_LOSE
         else:
             client.accepted = 0
             client.win = 2
-    elif int(client.buff[2]) > int(client.heaps[int(client.buff[1])]):
+    elif int(client.unpacked_data[2]) > int(client.heaps[int(client.unpacked_data[1])]): # input bigger than possible
         client.heaps = server_move(client.heaps)
         if client.heaps == [0, 0, 0]:
             client.accepted = 0
-            client.win = 0
+            client.win = CLIENT_LOSE
         else:
             client.accepted = 0
             client.win = 2
     else:
-        client.heaps[int(client.buff[1])] -= int(client.buff[2])
+        client.heaps[int(client.unpacked_data[1])] -= int(client.unpacked_data[2])
         if client.heaps == [0, 0, 0]:
             client.accepted = 1
-            client.win = 1
+            client.win = CLIENT_WIN
         else:
             client.heaps = server_move(client.heaps)
-        if client.heaps == [0, 0, 0]:
-            client.accepted = 1
-            client.win = 0
-        else:
-            client.accepted = 1
-            client.win = 0
+            if client.heaps == [0, 0, 0]:
+                client.accepted = 1
+                client.win = CLIENT_LOSE
+            else:
+                client.accepted = 1
+                client.win = 2
+
 
 def send_message(client):
     send_msg = [client.TYPE, client.accepted, client.heaps[0], client.heaps[1], client.heaps[2], client.win, END]
     send_msg = [int(e) for e in send_msg]
-    packed_data = struct.pack(SERVER_SEND_FORMAT, send_msg[0], send_msg[1], send_msg[2], send_msg[3], send_msg[4], send_msg[5], send_msg[6])
-    try:
-        to_next_stage = client.nonblocking_send(packed_data)  # figuring-out if in the next loop we have to comeback here cuz we dont have sendall anymore
-        if to_next_stage:
-            client.stage = 1  # indicating that in the next round we dont have to comeback to the greeting message and we should recv message from client
-    except client.socket.error as exc:
-        print("An error occurred while sending: %s\n" % exc)
-        sys.exit()
+    packed_data = struct.pack(SERVER_SEND_FORMAT, send_msg[0], send_msg[1], send_msg[2], send_msg[3], send_msg[4],
+                              send_msg[5], send_msg[6])
+
+    to_next_stage = client.nonblocking_send(packed_data)  # figuring-out if in the next loop we have to comeback here cuz we dont have sendall anymore
+    if to_next_stage:
+        client.stage = 1  # indicating that in the next round we dont have to comeback to the greeting message and we should recv message from client
 
 
 def send_greeting(client, first_heaps=[PAD, PAD, PAD]):
@@ -261,51 +276,60 @@ def send_greeting(client, first_heaps=[PAD, PAD, PAD]):
                      FIRST BYTE == REJECTED: "You are rejected by the server.\n"}
     """
     """making sure we can send to that client"""
-    _, writeable, _ = select(rlist=[], wlist=[client.socket], xlist=[], timeout=10)
-    if socket in writeable:
-        try:
-            to_next_stage = client.nonblocking_send(
-                packed_data)  # figuring-out if in the next loop we have to comeback here cuz we dont have sendall anymore
-            if to_next_stage:
+    _, writeable, _ = select([], [client.socket], [], 0.5)
+    if client.socket in writeable:
+        to_next_stage = client.nonblocking_send(packed_data)  # figuring-out if in the next loop we have to comeback here cuz we dont have sendall anymore
+        if to_next_stage == True:
+            if client.TYPE == ACTIVE_GREETING:
+                client.TYPE = ACTIVE
                 client.stage = 1  # indicating that in the next round we dont have to comeback to the greeting message and we should recv message from client
-        except client.socket.error as exc:
-            print("An error occurred while sending: %s\n" % exc)
-            sys.exit()
+        if to_next_stage == -1:
+            return 0
+        return 1
 
 
 def main(port, heaps, max_players, max_queue):
     listening_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listening_socket.bind(('', port))
     listening_socket.listen(ARBITRARY)
+    #queue[listening_socket] = Client(listening_socket, heaps, 3333,WAITING)
     while True:
-        removing_exited_sockets()  # removing sockets that quite from queue
+        if len(queue) > 0:
+            removing_exited_sockets()  # removing sockets that quite from queue
         wait_to_active(max_players)  # moving players from queue to active game
-        Readable, _, _ = select(read_list=[listening_socket], wlist=[], xlist=[], __timeout=0.2)
+        Readable, _, _ = select([listening_socket], [], [], 0.2)
         if listening_socket in Readable:  # means it is ready to accept another incoming connection
-            new_client_socket, new_client_address = listening_socket.accept()  # accept wonâ€™t block
+            new_client_socket, new_client_address = listening_socket.accept()  # accept won’t block
             print("Connection from %s has been established!", new_client_address)
-            client = Client(new_client_socket, heaps, new_client_address)
+            deep_clone_heaps = [heaps[0], heaps[1], heaps[2]]
+            client = Client(new_client_socket, deep_clone_heaps, new_client_address)
             if len(active_sockets_dict) < max_players:  # dictionary to store the active players data
-                client.TYPE = ACTIVE
-                send_greeting(client, heaps)
-                active_sockets_dict[new_client_socket] = client  # dictionary of active sockets
+                client.TYPE = ACTIVE_GREETING
+                abruptly_quited = send_greeting(client, heaps)
+                if abruptly_quited == 1:
+                    active_sockets_dict[new_client_socket] = client  # dictionary of active sockets
             elif len(active_sockets_dict) >= max_players and len(queue) < max_queue:  # waiting clients
                 client.TYPE = WAITING
                 send_greeting(client)
                 queue[new_client_socket] = client  # ordered insertions
             else:  # reject this client
                 send_greeting(client)  # TYPE == REJECT is default for class client
-        read_ready, write_ready, _ = select(active_sockets_dict.keys(), active_sockets_dict.keys(), xlist=[], timeout=10)
-        for read_ready_sock in read_ready:  # read-ready sockets
-            if 1 == active_sockets_dict[read_ready_sock].stage:  # read_ready_sock.recv() would not block here
-                updating_client(active_sockets_dict[read_ready_sock])
 
-        for write_ready_sock in write_ready:
-            if 0 == active_sockets_dict[write_ready_sock].stage:  # didnt finish greeting from previous iteration or move from waiting list to active dict
-                send_greeting(client, heaps)
+        if len(active_sockets_dict) > 0:
+            read_ready, write_ready, _ = select(active_sockets_dict.keys(), active_sockets_dict.keys(), [], 0.5)
+            for read_ready_sock in read_ready:  # read-ready sockets
+                if 1 == active_sockets_dict[read_ready_sock].stage:  # read_ready_sock.recv() would not block here
+                    updating_client(active_sockets_dict[read_ready_sock])
 
-            elif 2 == active_sockets_dict[write_ready_sock].stage:  # write_ready_sock.send() would not block here
-                send_message(active_sockets_dict[write_ready_sock])
+        if len(active_sockets_dict) > 0:
+            _, write_ready, _ = select([], active_sockets_dict.keys(), [], 0.5)
+            for write_ready_sock in write_ready:
+                if 0 == active_sockets_dict[write_ready_sock].stage:  # didnt finish greeting from previous iteration or move from waiting list to active dict
+                    send_greeting(client, heaps)
+
+                elif 2 == active_sockets_dict[write_ready_sock].stage:  # write_ready_sock.send() would not block here
+                    send_message(active_sockets_dict[write_ready_sock])
+
 
 if __name__ == '__main__':
     if len(sys.argv) < 6:
@@ -316,3 +340,4 @@ if __name__ == '__main__':
     main_port = 6444 if (len(sys.argv) < 7) else sys.argv[6]
     main_port = int(main_port)
     main(main_port, main_heaps, int(max_players_num), int(max_queue_size))
+
