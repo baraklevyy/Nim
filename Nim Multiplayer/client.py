@@ -4,13 +4,15 @@ import sys
 import struct
 from select import select
 
+##################################
+#            DEFINES             #
+##################################
 CLIENT_SEND_FORMAT = '>iiii'
 CLIENT_REC_FORMAT = '>iiiiiii'
 PAD = -3
 START = -1
 END = -2
 EOF_LIKE = b''
-max_bandwidth = 10000
 BAD_INPUT = -100
 GREETING = -5
 ACTIVE_GREETING = -5
@@ -21,12 +23,16 @@ WIN = 1
 LOSE = 0
 SERVER_SEND_LENGTH = 28
 SERVER_RECEIVE_LENGTH = 16
-connected_socket_dict = {}
 SEND_READY = 2
 RECEIVE_READY = 1
 TEMPORARY_TIME = -1
 BLOCK = -4
 GATHERING_INPUT = -6
+##################################
+#        GLOBAL VARIABLES        #
+##################################
+connected_socket_dict = {}
+
 
 class Client:
     def __init__(self, this_socket):
@@ -37,11 +43,15 @@ class Client:
         self.unpacked_data = ()
         self.data_to_send = ()
 
-
     # ********* FUNCTION MEMBERS ************
 
     # _______________________________________________________________
     def nonblocking_send(self, data):
+        """
+        Using this func in order to send data to the server after the server is ready (checked by select)
+        :param data: data to send
+        :return: True if all data sent, False otherwise
+        """
         if len(data) == 0:
             return None
         self.amount_so_far += self.socket.send(data[self.amount_so_far:])
@@ -50,12 +60,24 @@ class Client:
 
     # ________________________________________________________________
     def nonblocking_receive(self):
-        self.data += self.socket.recv(SERVER_SEND_LENGTH - len(self.data))
+        """
+        Receiving data from server after select 'afford' it
+        :return: True if all data (by established protocol) received from the server False otherwise
+        """
+        current_data = self.socket.recv(SERVER_SEND_LENGTH - len(self.data))
+        if current_data == EOF_LIKE:  # server probably terminate
+            self.data = current_data
+            return False
+        self.data += current_data
         ret = self.is_receive_done()
         return ret
 
     # ________________________________________________________________
     def is_send_done(self):
+        """
+        Helper function for checking if sending done
+        :return:
+        """
         if self.amount_so_far == SERVER_RECEIVE_LENGTH:
             self.amount_so_far = 0
             return True
@@ -63,14 +85,29 @@ class Client:
 
     # _____________________________________________________________
     def is_receive_done(self):
+        """
+        Helper function for checking if receiving all data obey to the established protocol
+        :return:
+        """
         return True if len(self.data) == SERVER_SEND_LENGTH else False
 
     # ________________________________________________________________
     def nullify_data(self):
+        """
+        Nullifying data
+        :return:
+        """
         self.data = b''
 
     # ________________________________________________________________
-def show_heaps(client):  # also: returns 0 in case game is over or server rejection, 1 for continue game flow, -1 if WAITING mode
+def show_heaps(client):
+    """
+    Printing to the player the current game status
+    :param client:
+    :return: -1: if we're in 'WATING' mode
+              0: if gameover of server rejection
+              1: continue game-flow
+    """
     rec_msg = client.unpacked_data
     if rec_msg[0] == WAITING:
         print('Waiting to play against the server.\n')
@@ -97,21 +134,25 @@ def show_heaps(client):  # also: returns 0 in case game is over or server reject
         print("Your turn:\n")
         client.stage = GATHERING_INPUT
 
-
     if rec_msg[5] in [LOSE, WIN]:
         return 0
     else:
         return 1
-
-
-def fill_buff(client):  # # return 1 if connection is terminated, 0 if buffer is ready , -1 if buffer not ready yet
+def fill_buff(client):
+    """
+    Receiving data from the server socket and collect it into 'client.data' member variable
+    :param client:
+    :return: -1: buffer is not ready yet
+              0: if buffer is ready to work with - indicating all good
+              1: if connection is terminated
+    """
     try:
         is_done = client.nonblocking_receive()
     except OSError as exc:
         print("An error occurred: %s\n" % exc)
         sys.exit()
 
-    if client.data == EOF_LIKE: # server fall
+    if client.data == EOF_LIKE:  # server fall
         client.socket.close()
         return 1
     if is_done:
@@ -120,15 +161,21 @@ def fill_buff(client):  # # return 1 if connection is terminated, 0 if buffer is
         client.data = b''
         return 0
     return -1
-
-
 def terminate(sock):
+    """
+Terminating socket and send 'shutdown' to the server
+    :param sock:
+    :return: exit the program
+    """
     sock.shutdown(socket.SHUT_RDWR)
     sock.close()
     sys.exit()
-
-
 def extract_input(client):
+    """
+    Gathering input from user after using select for 'sys.stdin'
+    :param client:
+    :return: filling client.data_to_send class member variable with the corresponding values
+    """
     is_legal = True
     user_input = list(input().split())
     abc = ['A', 'B', 'C']
@@ -144,10 +191,14 @@ def extract_input(client):
             is_legal = False
     send_msg[1] = abc.index(heap) if is_legal else BAD_INPUT
     send_msg[2] = amount if is_legal else BAD_INPUT
-    client.data_to_send = struct.pack(CLIENT_SEND_FORMAT, int(send_msg[0]), int(send_msg[1]), int(send_msg[2]), int(send_msg[3]))
-    client.stage == SEND_READY
-
+    client.data_to_send = struct.pack(CLIENT_SEND_FORMAT, int(send_msg[0]), int(send_msg[1]), int(send_msg[2]),
+                                      int(send_msg[3]))
 def send_command(client):
+    """
+    Sendnig packed  bytes to the server if select 'afford' it
+    :param client:
+    :return: changing client game status
+    """
     try:
         is_done_sending = client.nonblocking_send(client.data_to_send)
         if is_done_sending:
@@ -156,7 +207,6 @@ def send_command(client):
     except OSError as exc:
         print("An error occurred: %s\n" % exc)
         sys.exit()
-
 def main(hostname, port):
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client = Client(s)
@@ -186,8 +236,6 @@ def main(hostname, port):
                         terminate(s)
         if s in write_ready and client.stage == SEND_READY:
             send_command(client)
-
-
 if __name__ == '__main__':
     hostname, port = "", 0
     if len(sys.argv) < 2:
